@@ -3,7 +3,7 @@
  * Estrategia: cache-first para los recursos propios y vendor (modelos/libs),
  * con red como respaldo. Sube CACHE_VERSION al cambiar archivos.
  */
-const CACHE_VERSION = 'ai-hud-v1';
+const CACHE_VERSION = 'ai-hud-v2';
 const APP_SHELL = [
   './',
   './index.html',

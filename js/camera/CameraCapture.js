@@ -19,6 +19,11 @@ export class CameraCapture {
   }
 
   async start() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      const e = new Error('getUserMedia no disponible (¿contexto inseguro?)');
+      e.name = 'SecurityError';
+      throw e;
+    }
     let lastErr = null;
     for (const res of CONFIG.camera.preferred) {
       try {
@@ -48,12 +53,19 @@ export class CameraCapture {
     this.track = this.stream.getVideoTracks()[0];
     this.settings = this.track.getSettings();
     this.video.srcObject = this.stream;
-    await this.video.play();
+    this.video.muted = true;
+    this.video.setAttribute('playsinline', '');
+    try { await this.video.play(); } catch { /* reintento tras metadata */ }
 
     // Espera a metadata para tener dimensiones reales.
     if (!this.video.videoWidth) {
-      await new Promise((r) => this.video.addEventListener('loadedmetadata', r, { once: true }));
+      await new Promise((r) => {
+        const done = () => r();
+        this.video.addEventListener('loadedmetadata', done, { once: true });
+        setTimeout(done, 3000); // no bloquear indefinidamente
+      });
     }
+    try { await this.video.play(); } catch { /* ya reproduciendo */ }
     this.ready = true;
     return this.settings;
   }

@@ -9,7 +9,7 @@ import { LightDetector } from './vision/LightDetector.js';
 import { AlertSystem } from './audio/AlertSystem.js';
 import { HudRenderer } from './ui/HudRenderer.js';
 import { PerfMonitor } from './util/PerfMonitor.js';
-import { smoothBox, clamp } from './util/math.js';
+import { smoothBox } from './util/math.js';
 
 /** Escala virtual para que el tracker Kalman trabaje en un espacio estable. */
 const VSCALE = 1000;
@@ -21,114 +21,142 @@ const RISK_TEXT = {
 };
 
 /**
- * Orquestador del pipeline. Mantiene etapas desacopladas:
- *   captura → inferencia (worker) → tracking → fusión de sensores →
- *   estimación → predicción → render (60 fps) → alertas.
- * El render corre a la cadencia de la pantalla; la IA a su propio ritmo
- * adaptativo, y la UI interpola entre actualizaciones para fluidez.
+ * Orquestador del pipeline con arranque a prueba de fallos:
+ *   1) abre la cámara y MUESTRA el HUD de inmediato (render a 60 fps),
+ *   2) carga el modelo de IA en segundo plano (su fallo NO bloquea la cámara),
+ *   3) arranca sensores en segundo plano.
+ * Etapas desacopladas: captura → inferencia(worker) → tracking → fusión →
+ * estimación → predicción → render → alertas.
  */
 class App {
-  constructor() {
+  constructor(onStatus) {
+    this.onStatus = onStatus || (() => {});
     this.video = document.getElementById('camVideo');
     this.camera = new CameraCapture(this.video);
-    this.vision = new VisionEngine();
-    this.tracker = new SortTracker();
     this.sensors = new SensorFusion();
     this.motion = new MotionEstimator();
     this.predict = new PredictionEngine();
     this.lights = new LightDetector();
     this.audio = new AlertSystem();
     this.perf = new PerfMonitor();
-    this.renderer = new HudRenderer(
-      document.getElementById('glCanvas'),
-      document.getElementById('hudCanvas'),
-      this.video,
-    );
+    this.tracker = new SortTracker();
+    this.vision = null;   // se crea tras revelar la cámara
+    this.renderer = null; // idem
+    this.aiReady = false;
 
-    this.objects = new Map(); // id -> estado de objeto suavizado para UI
+    this.objects = new Map();
     this.sceneLuma = 0.5;
+    this._lumaEma = 0.5;
     this.running = false;
     this.muted = false;
-    this._lumaEma = 0.5;
-    this._wireUI();
+    this.showDetail = true;
   }
 
-  _wireUI() {
-    const status = document.getElementById('startStatus');
-    document.getElementById('startBtn').addEventListener('click', async (e) => {
-      e.currentTarget.disabled = true;
-      try {
-        status.textContent = 'Solicitando cámara y sensores…';
-        this.audio.resume();
-        await this._boot(status);
-      } catch (err) {
-        status.textContent = 'Error: ' + (err.message || err);
-        e.currentTarget.disabled = false;
-      }
-    });
+  async start() {
+    this._wireControls();
 
-    document.getElementById('muteBtn').addEventListener('click', (e) => {
+    // 1) CÁMARA primero. Es lo crítico: si esto falla, lo decimos claro.
+    this.onStatus('Solicitando acceso a la cámara…');
+    this.audio.resume();
+    let settings;
+    try {
+      settings = await this.camera.start();
+    } catch (err) {
+      throw new Error(this._cameraErrorText(err));
+    }
+    this.onStatus(`Cámara ${settings.width}×${settings.height} lista.`);
+
+    // 2) Revela el escenario y arranca el render YA (se ve el vídeo al instante).
+    document.getElementById('startScreen').classList.add('hidden');
+    document.getElementById('stage').classList.remove('hidden');
+    this.renderer = this._makeRenderer();
+    this.running = true;
+    requestAnimationFrame((t) => this._renderLoop(t));
+
+    // 3) Sensores en segundo plano (no bloqueante).
+    this.sensors.start().catch((e) => console.warn('[sensors]', e));
+
+    // 4) Modelo de IA en segundo plano: su fallo no apaga la cámara.
+    this._setAiState('IA: cargando modelo…');
+    this._initVision();
+  }
+
+  _makeRenderer() {
+    try {
+      return new HudRenderer(
+        document.getElementById('glCanvas'),
+        document.getElementById('hudCanvas'),
+        this.video,
+      );
+    } catch (e) {
+      console.error('[renderer]', e);
+      this._toast('Render en modo compatibilidad (sin WebGL2).');
+      return new HudRenderer(
+        document.getElementById('glCanvas'),
+        document.getElementById('hudCanvas'),
+        this.video,
+        true, // forzar fallback 2D
+      );
+    }
+  }
+
+  async _initVision() {
+    try {
+      this.vision = new VisionEngine();
+      this.vision.onDetections = (dets) => this._onDetections(dets);
+      this.vision.onError = (e) => console.warn('[vision]', e);
+      await this.vision.init();
+      this.aiReady = true;
+      this._setAiState(`IA lista · ${this.vision.backend}`);
+      this._inferLoop();
+    } catch (err) {
+      console.error('[vision init]', err);
+      this.aiReady = false;
+      this._setAiState('IA no disponible (offline). Cámara + sensores activos.');
+      this._toast('Modelo no cargado: revisa red o vendoriza en /vendor. La cámara y los sensores siguen activos.');
+    }
+  }
+
+  _wireControls() {
+    const mute = document.getElementById('muteBtn');
+    mute && mute.addEventListener('click', (e) => {
       this.muted = !this.muted;
       this.audio.setMuted(this.muted);
       e.currentTarget.textContent = this.muted ? '🔇' : '🔊';
       e.currentTarget.classList.toggle('off', this.muted);
     });
-    document.getElementById('hudBtn').addEventListener('click', (e) => {
-      this.detail = !this.detail;
-      e.currentTarget.classList.toggle('off', !this.detail);
+    const hud = document.getElementById('hudBtn');
+    hud && hud.addEventListener('click', (e) => {
+      this.showDetail = !this.showDetail;
+      e.currentTarget.classList.toggle('off', !this.showDetail);
     });
-    document.getElementById('stopBtn').addEventListener('click', () => this._shutdown());
+    const stop = document.getElementById('stopBtn');
+    stop && stop.addEventListener('click', () => this._shutdown());
   }
 
-  async _boot(status) {
-    // 1) Cámara trasera en máxima calidad.
-    const settings = await this.camera.start();
-    status.textContent = `Cámara ${settings.width}×${settings.height} · cargando modelo…`;
-
-    // 2) Worker de visión (TensorFlow.js).
-    await this.vision.init();
-    this.vision.onDetections = (dets) => this._onDetections(dets);
-    this.vision.onError = (e) => console.warn('[vision]', e);
-
-    // 3) Sensores (no bloqueante).
-    this.sensors.start().catch((e) => console.warn('[sensors]', e));
-
-    // 4) Mostrar escenario y arrancar bucles.
-    document.getElementById('startScreen').classList.add('hidden');
-    document.getElementById('stage').classList.remove('hidden');
-    this.renderer._resize();
-
-    this.running = true;
-    this._lastInfer = 0;
-    requestAnimationFrame((t) => this._renderLoop(t));
-    this._inferLoop();
-  }
-
-  // ---------- Bucle de inferencia (cadencia adaptativa) ----------
+  // ---------- Inferencia (cadencia adaptativa) ----------
   async _inferLoop() {
-    if (!this.running) return;
+    if (!this.running || !this.aiReady) return;
     const interval = this.perf.aiFrameInterval;
     this.vision.setConfig({ inputSize: this.perf.inputSize });
-    await this.vision.maybeInfer(
-      () => this.camera.grabBitmap(this.perf.inputSize),
-      interval,
-    );
-    // Reprograma sin bloquear; el descarte de frames lo gestiona el worker.
+    try {
+      await this.vision.maybeInfer(
+        () => this.camera.grabBitmap(this.perf.inputSize),
+        interval,
+      );
+    } catch (e) { /* frame perdido; continúa */ }
     setTimeout(() => this._inferLoop(), Math.max(8, interval / 2));
   }
 
-  /** Callback con detecciones normalizadas del worker. */
   _onDetections(dets) {
     this.perf.tickAI();
 
-    // Frame reducido para optical flow, luma y análisis de luces.
     const reduced = this.camera.grabReduced(this.perf.inputSize);
     if (reduced) {
       this._updateLuma(reduced);
       this.motion.computeSceneFlow(reduced);
     }
 
-    // Tracking en espacio virtual estable.
     const scaled = dets.map((d) => ({
       box: [d.box[0] * VSCALE, d.box[1] * VSCALE, d.box[2] * VSCALE, d.box[3] * VSCALE],
       label: d.label, score: d.score,
@@ -141,7 +169,6 @@ class App {
     const activeIds = new Set();
 
     for (const t of tracks) {
-      // Vuelve a normalizado [0,1].
       const boxN = [t.box[0] / VSCALE, t.box[1] / VSCALE, t.box[2] / VSCALE, t.box[3] / VSCALE];
       const velN = [t.velPx[0] / VSCALE, t.velPx[1] / VSCALE];
       const trackN = { id: t.id, label: t.label, score: t.score, box: boxN, velPx: velN };
@@ -153,22 +180,15 @@ class App {
       activeIds.add(t.id);
       const prev = this.objects.get(t.id);
       this.objects.set(t.id, {
-        id: t.id,
-        label: t.label,
-        targetBox: boxN,
-        box: prev ? prev.box : boxN.slice(),
-        distanceM: metrics.distanceM,
-        objSpeedKmh: metrics.objSpeedKmh,
-        closingMps: metrics.closingMps,
-        ttc: metrics.ttc,
-        risk: pred.risk,
-        path: pred.path,
-        lights,
-        lastSeen: performance.now(),
+        id: t.id, label: t.label,
+        targetBox: boxN, box: prev ? prev.box : boxN.slice(),
+        distanceM: metrics.distanceM, objSpeedKmh: metrics.objSpeedKmh,
+        closingMps: metrics.closingMps, ttc: metrics.ttc,
+        risk: pred.risk, path: pred.path, safeDistM: pred.safeDistM,
+        lights, lastSeen: performance.now(),
       });
     }
 
-    // Limpieza de objetos perdidos.
     for (const [id, o] of this.objects) {
       if (!activeIds.has(id) && performance.now() - o.lastSeen > 600) this.objects.delete(id);
     }
@@ -186,79 +206,110 @@ class App {
     this.sceneLuma = this._lumaEma;
   }
 
-  // ---------- Bucle de render (60 fps) ----------
+  // ---------- Render (60 fps) ----------
   _renderLoop(t) {
     if (!this.running) return;
     this.perf.tickUI();
 
-    // Interpolación temporal: suaviza cajas hacia su objetivo cada frame.
     let maxRisk = RISK.NONE;
+    let nearest = null;
     const objects = [];
     for (const o of this.objects.values()) {
       o.box = smoothBox(o.box, o.targetBox, CONFIG.ui.boxSmoothing);
       if (o.risk > maxRisk) maxRisk = o.risk;
+      // "Más cercano en trayectoria" = central y a menor distancia.
+      const central = Math.abs((o.box[0] + o.box[2] / 2) - 0.5) < 0.33;
+      if (central && (!nearest || o.distanceM < nearest.distanceM)) nearest = o;
       objects.push(o);
     }
 
-    // Día/noche automático con histéresis.
     if (!this.renderer.night && this._lumaEma < CONFIG.ui.nightLumaThreshold) {
       this.renderer.setTone(true, this._lumaEma);
     } else if (this.renderer.night && this._lumaEma > CONFIG.ui.dayLumaThreshold) {
       this.renderer.setTone(false, this._lumaEma);
     }
 
-    // Alertas sonoras según riesgo máximo.
     if (maxRisk > RISK.NONE) this.audio.alert(maxRisk);
 
     const ego = this.sensors.snapshot();
+    const safeDist = Math.max(5, ego.speedMps * CONFIG.prediction.safeHeadwaySec);
+
     this.renderer.render({
       objects,
-      ego: { speedKmh: ego.speedKmh, heading: ego.heading, accelLong: ego.accelLong },
+      showDetail: this.showDetail,
+      ego: { speedKmh: ego.speedKmh, heading: ego.heading, accelLong: ego.accelLong,
+             hasGps: ego.hasGps },
+      focus: nearest ? {
+        distanceM: nearest.distanceM, ttc: nearest.ttc,
+        closingMps: nearest.closingMps, risk: nearest.risk,
+      } : null,
+      safe: { distM: safeDist, count: objects.length,
+              tooClose: nearest ? nearest.distanceM < safeDist : false },
       alerts: { level: maxRisk, text: RISK_TEXT[maxRisk] || '' },
       stats: {
         uiFps: this.perf.uiFps, aiFps: this.perf.aiFps,
-        backend: this.vision.backend, inputSize: this.perf.inputSize,
+        backend: this.vision ? this.vision.backend : '--',
+        inputSize: this.perf.inputSize, aiReady: this.aiReady,
       },
     });
 
-    // Telemetría DOM (barato, 1 vez/frame).
     this._updateTelemetry();
-
     requestAnimationFrame((tt) => this._renderLoop(tt));
   }
 
   _updateTelemetry() {
-    document.getElementById('fpsUI').textContent = `UI ${this.perf.uiFps.toFixed(0)} fps`;
-    document.getElementById('fpsAI').textContent = `AI ${this.perf.aiFps.toFixed(0)} fps`;
-    document.getElementById('modeTag').textContent =
-      (this.renderer.night ? '🌙 noche' : '☀️ día');
+    this._set('fpsUI', `UI ${this.perf.uiFps.toFixed(0)} fps`);
+    this._set('fpsAI', `AI ${this.aiReady ? this.perf.aiFps.toFixed(0) : '--'} fps`);
+    this._set('modeTag', this.renderer.night ? '🌙 noche' : '☀️ día');
+  }
+
+  _set(id, txt) { const el = document.getElementById(id); if (el) el.textContent = txt; }
+  _setAiState(txt) { this._set('aiState', txt); }
+
+  _toast(msg, ms = 4200) {
+    const el = document.getElementById('toast');
+    if (!el) return;
+    el.textContent = msg;
+    el.classList.remove('hidden');
+    clearTimeout(this._toastT);
+    this._toastT = setTimeout(() => el.classList.add('hidden'), ms);
+  }
+
+  _cameraErrorText(err) {
+    const name = err && err.name ? err.name : '';
+    if (name === 'NotAllowedError' || name === 'SecurityError')
+      return 'Permiso de cámara denegado. Acéptalo en el navegador y reintenta.';
+    if (name === 'NotFoundError' || name === 'OverconstrainedError')
+      return 'No se encontró una cámara compatible en el dispositivo.';
+    if (name === 'NotReadableError')
+      return 'La cámara está en uso por otra app. Ciérrala y reintenta.';
+    if (!window.isSecureContext)
+      return 'La cámara requiere HTTPS o http://localhost (contexto seguro).';
+    return 'No se pudo abrir la cámara: ' + (err && err.message ? err.message : err);
   }
 
   _shutdown() {
     this.running = false;
     this.camera.stop();
     this.sensors.stop();
-    this.vision.dispose();
+    if (this.vision) this.vision.dispose();
     document.getElementById('stage').classList.add('hidden');
-    const start = document.getElementById('startScreen');
-    start.classList.remove('hidden');
-    document.getElementById('startBtn').disabled = false;
-    document.getElementById('startStatus').textContent = 'Detenido. Pulsa para reiniciar.';
+    document.getElementById('startScreen').classList.remove('hidden');
+    const btn = document.getElementById('startBtn');
+    if (btn) btn.disabled = false;
+    this.onStatus('Detenido. Pulsa para reiniciar.');
   }
 }
 
-// Arranque.
-window.addEventListener('DOMContentLoaded', () => {
-  // Requiere contexto seguro para getUserMedia (https o localhost).
-  if (!window.isSecureContext && location.hostname !== 'localhost' &&
-      location.hostname !== '127.0.0.1') {
-    document.getElementById('startStatus').textContent =
-      'Aviso: la cámara requiere HTTPS o localhost.';
-  }
-  window.__app = new App();
+/** Punto de entrada llamado por el bootstrap de index.html. */
+export async function startApp({ onStatus } = {}) {
+  if (window.__app && window.__app.running) return window.__app;
+  const app = new App(onStatus);
+  window.__app = app;
+  await app.start();
 
-  // Service worker opcional: cachea el shell para ejecución 100% offline.
   if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('./sw.js').catch(() => { /* offline opcional */ });
+    navigator.serviceWorker.register('./sw.js').catch(() => {});
   }
-});
+  return app;
+}
