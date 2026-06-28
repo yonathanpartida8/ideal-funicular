@@ -19,15 +19,22 @@ const RISK_COLOR = {
 };
 
 export class HudRenderer {
-  constructor(glCanvas, hudCanvas, video) {
+  constructor(glCanvas, hudCanvas, video, forceFallback = false) {
     this.glCanvas = glCanvas;
     this.hudCanvas = hudCanvas;
     this.video = video;
     this.ctx2d = hudCanvas.getContext('2d');
     this.dpr = Math.min(window.devicePixelRatio || 1, 2);
     this.night = false;
+    this.glFailed = false;
     this._tone = { brightness: 1.0, contrast: 1.0, gamma: 1.0 };
-    this._initGL();
+    if (!forceFallback) {
+      try { this._initGL(); }
+      catch (e) { console.error('[gl init]', e); this.glFailed = true; }
+    } else {
+      this.glFailed = true;
+    }
+    if (this.glFailed) this._initFallback2D();
     this._resize();
     window.addEventListener('resize', () => this._resize());
     window.addEventListener('orientationchange', () => setTimeout(() => this._resize(), 200));
@@ -113,6 +120,12 @@ export class HudRenderer {
     this._geoData = new Float32Array(4096 * 6);
   }
 
+  /** Contexto 2D sobre el canvas de fondo cuando no hay WebGL2. */
+  _initFallback2D() {
+    // getContext('2d') sólo es válido si NO se obtuvo antes un contexto webgl.
+    this.glBg = this.glCanvas.getContext('2d');
+  }
+
   _program(vsSrc, fsSrc) {
     const gl = this.gl;
     const vs = this._shader(gl.VERTEX_SHADER, vsSrc);
@@ -175,11 +188,30 @@ export class HudRenderer {
    *                          stats:{uiFps,aiFps,backend,inputSize} }
    */
   render(frame) {
-    if (this.glFailed) return;
     this._cover = this._coverParams();
-    this._drawVideoGL();
-    this._drawGeometryGL(frame);
-    this._drawOverlay2D(frame);
+    if (this.glFailed) {
+      this._drawVideo2D();      // vídeo por Canvas2D (modo compatibilidad)
+    } else {
+      this._drawVideoGL();
+      this._drawGeometryGL(frame);
+    }
+    this._drawOverlay2D(frame);  // texto/cajas/paneles siempre por Canvas2D
+  }
+
+  /** Dibuja el vídeo con Canvas2D (fallback sin WebGL2), encuadre "cover". */
+  _drawVideo2D() {
+    const ctx = this.glBg;
+    if (!ctx) return;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, this.W, this.H);
+    if (this.video.readyState >= 2) {
+      const p = this._cover;
+      const t = this._tone;
+      ctx.filter = `brightness(${t.brightness}) contrast(${t.contrast})`;
+      try { ctx.drawImage(this.video, p.ox, p.oy, p.dw, p.dh); } catch {}
+      ctx.filter = 'none';
+    }
   }
 
   _drawVideoGL() {
@@ -300,6 +332,9 @@ export class HudRenderer {
     ctx.clearRect(0, 0, this.cssW, this.cssH);
     ctx.textBaseline = 'middle';
 
+    // En modo compatibilidad (sin WebGL2) dibujamos las cajas aquí.
+    if (this.glFailed) this._drawBoxes2D(ctx, frame);
+
     // Etiquetas flotantes por objeto.
     for (const o of frame.objects) {
       const col = RISK_COLOR[o.risk] || RISK_COLOR[RISK.NONE];
@@ -325,8 +360,83 @@ export class HudRenderer {
 
     this._drawSpeedo(ctx, frame.ego);
     this._drawCompass(ctx, frame.ego);
+    if (frame.showDetail !== false) this._drawInfoPanel(ctx, frame);
     this._drawAlertBanner(ctx, frame.alerts);
     this._drawStats(ctx, frame.stats);
+  }
+
+  /** Cajas con esquinas tipo corchete usando Canvas2D (fallback sin WebGL2). */
+  _drawBoxes2D(ctx, frame) {
+    for (const o of frame.objects) {
+      const col = RISK_COLOR[o.risk] || RISK_COLOR[RISK.NONE];
+      const rgb = `rgb(${(col[0] * 255) | 0},${(col[1] * 255) | 0},${(col[2] * 255) | 0})`;
+      const [ax, ay] = this._n2s(o.box[0], o.box[1]);
+      const [bx, by] = this._n2s(o.box[0] + o.box[2], o.box[1] + o.box[3]);
+      const x0 = ax / this.dpr, y0 = ay / this.dpr, x1 = bx / this.dpr, y1 = by / this.dpr;
+      const seg = Math.min(x1 - x0, y1 - y0) * 0.28;
+      ctx.strokeStyle = rgb;
+      ctx.lineWidth = o.risk >= RISK.CRITICAL ? 3.5 : 2.2;
+      ctx.shadowColor = rgb; ctx.shadowBlur = 12;
+      ctx.beginPath();
+      // 4 esquinas (corchetes).
+      ctx.moveTo(x0, y0 + seg); ctx.lineTo(x0, y0); ctx.lineTo(x0 + seg, y0);
+      ctx.moveTo(x1 - seg, y0); ctx.lineTo(x1, y0); ctx.lineTo(x1, y0 + seg);
+      ctx.moveTo(x0, y1 - seg); ctx.lineTo(x0, y1); ctx.lineTo(x0 + seg, y1);
+      ctx.moveTo(x1 - seg, y1); ctx.lineTo(x1, y1); ctx.lineTo(x1, y1 - seg);
+      ctx.stroke();
+      ctx.shadowBlur = 0;
+      // Trayectoria.
+      if (o.path && o.path.length) {
+        ctx.strokeStyle = rgb; ctx.lineWidth = 2; ctx.globalAlpha = 0.5;
+        ctx.beginPath();
+        const cx = o.box[0] + o.box[2] / 2, cy = o.box[1] + o.box[3];
+        const [px, py] = this._n2s(cx, cy);
+        ctx.moveTo(px / this.dpr, py / this.dpr);
+        for (const p of o.path) {
+          const [qx, qy] = this._n2s(p.x, Math.min(1, p.y + o.box[3] / 2));
+          ctx.lineTo(qx / this.dpr, qy / this.dpr);
+        }
+        ctx.stroke(); ctx.globalAlpha = 1;
+      }
+    }
+  }
+
+  /** Panel de información: distancia segura, conteo, objetivo más cercano, TTC. */
+  _drawInfoPanel(ctx, frame) {
+    const safe = frame.safe || {};
+    const focus = frame.focus;
+    const x = 12, y = this.cssH - 168, w = 188;
+    ctx.save();
+    ctx.fillStyle = 'rgba(2,12,16,0.55)';
+    this._roundRect(ctx, x, y, w, 120, 12); ctx.fill();
+    ctx.strokeStyle = 'rgba(47,243,224,0.22)'; ctx.lineWidth = 1;
+    this._roundRect(ctx, x, y, w, 120, 12); ctx.stroke();
+
+    ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+    let ly = y + 22;
+    const row = (label, value, color) => {
+      ctx.fillStyle = '#8fc6cc'; ctx.font = '600 11px Segoe UI, Roboto, sans-serif';
+      ctx.fillText(label, x + 12, ly);
+      ctx.fillStyle = color || '#eafdff';
+      ctx.font = '700 14px Segoe UI, Roboto, sans-serif';
+      ctx.textAlign = 'right'; ctx.fillText(value, x + w - 12, ly);
+      ctx.textAlign = 'left'; ly += 25;
+    };
+
+    const safeColor = safe.tooClose ? 'rgb(255,77,94)' : 'rgb(77,255,161)';
+    row('Distancia segura', `${(safe.distM || 0).toFixed(0)} m`, safeColor);
+    row('Vehículos', `${safe.count || 0}`);
+    if (focus) {
+      row('Más cercano', `${focus.distanceM.toFixed(0)} m`,
+        focus.risk >= 2 ? 'rgb(255,207,77)' : '#eafdff');
+      const ttc = Number.isFinite(focus.ttc) ? `${focus.ttc.toFixed(1)} s` : '—';
+      row('TTC', ttc, focus.risk >= 3 ? 'rgb(255,77,94)' : '#eafdff');
+    } else {
+      row('Más cercano', '—');
+      row('TTC', '—');
+    }
+    ctx.restore();
+    ctx.textBaseline = 'middle';
   }
 
   _drawSpeedo(ctx, ego) {

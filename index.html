@@ -21,14 +21,14 @@
       <p class="subtitle">Copiloto digital · 100% local · sin nube</p>
       <ul class="feature-list">
         <li>Detección de vehículos en tiempo real (on-device)</li>
-        <li>Tracking multi-objeto + estimación de velocidad relativa</li>
-        <li>Fusión de sensores (GPS, acelerómetro, giroscopio, brújula)</li>
-        <li>Alertas de colisión por tiempo a colisión (TTC)</li>
+        <li>Tracking multi-objeto + velocidad relativa</li>
+        <li>Fusión de sensores (GPS, IMU, brújula)</li>
+        <li>Distancia segura y alertas de colisión (TTC)</li>
       </ul>
       <button id="startBtn" class="primary-btn">INICIAR HUD</button>
       <p class="legal">
         Asistencia experimental. No sustituye la atención del conductor.
-        No realiza reconocimiento de personas, placas ni identidades.
+        No reconoce personas, placas ni identidades.
       </p>
       <p id="startStatus" class="status-line"></p>
     </div>
@@ -36,30 +36,78 @@
 
   <!-- ===== Escenario principal ===== -->
   <main id="stage" class="stage hidden">
-    <!-- Video oculto: fuente de la cámara, dibujado vía WebGL -->
     <video id="camVideo" playsinline muted autoplay></video>
 
-    <!-- Capa 0: render WebGL2 (video + cajas + trayectorias con glow) -->
+    <!-- Capa 0: render WebGL2 (video + cajas + trayectorias) con fallback 2D -->
     <canvas id="glCanvas" class="layer gl-layer"></canvas>
-
-    <!-- Capa 1: overlay Canvas2D (texto nítido, etiquetas, indicadores) -->
+    <!-- Capa 1: overlay Canvas2D (texto, paneles, indicadores) -->
     <canvas id="hudCanvas" class="layer hud-layer"></canvas>
 
-    <!-- Panel de telemetría / controles -->
     <div id="telemetry" class="telemetry">
-      <div class="tele-row"><span id="fpsUI" class="tele-pill">UI -- fps</span>
+      <div class="tele-row">
+        <span id="fpsUI" class="tele-pill">UI -- fps</span>
         <span id="fpsAI" class="tele-pill">AI -- fps</span>
-        <span id="modeTag" class="tele-pill">--</span></div>
+        <span id="modeTag" class="tele-pill">--</span>
+      </div>
+      <div class="tele-row">
+        <span id="aiState" class="tele-pill">IA: cargando…</span>
+      </div>
     </div>
 
     <div class="controls">
       <button id="muteBtn" class="ctrl-btn" title="Audio">🔊</button>
-      <button id="hudBtn" class="ctrl-btn" title="Detalle HUD">◎</button>
+      <button id="hudBtn" class="ctrl-btn ctrl-on" title="Detalle HUD">◎</button>
       <button id="stopBtn" class="ctrl-btn" title="Detener">⏻</button>
     </div>
+
+    <div id="toast" class="toast hidden"></div>
   </main>
 
-  <!-- App como módulo ES6 -->
-  <script type="module" src="./js/main.js"></script>
+  <!--
+    Bootstrap robusto (script clásico): captura errores globales y los muestra
+    en pantalla, y carga el módulo ES dinámicamente al pulsar. Así, aunque el
+    grafo de módulos fallara, el botón siempre responde y se ve el motivo.
+  -->
+  <script>
+    (function () {
+      var statusEl = document.getElementById('startStatus');
+      var btn = document.getElementById('startBtn');
+      var started = false;
+
+      function show(msg) { if (statusEl) statusEl.textContent = msg; }
+
+      window.addEventListener('error', function (e) {
+        var m = (e && e.message) ? e.message : 'error desconocido';
+        // Evita ruido de recursos no críticos.
+        if (e && e.filename) m += ' (' + e.filename.split('/').pop() + ':' + e.lineno + ')';
+        console.error(e);
+        if (!started) show('⚠ ' + m);
+      });
+      window.addEventListener('unhandledrejection', function (e) {
+        var r = e && e.reason ? (e.reason.message || e.reason) : 'rechazo sin capturar';
+        console.error(e.reason);
+        show('⚠ ' + r);
+      });
+
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        show('Este navegador no permite la cámara aquí. Usa Chrome en https:// o http://localhost.');
+      }
+
+      btn.addEventListener('click', async function () {
+        if (started) return;
+        btn.disabled = true;
+        show('Iniciando…');
+        try {
+          var mod = await import('./js/main.js');
+          await mod.startApp({ onStatus: show });
+          started = true;
+        } catch (err) {
+          console.error(err);
+          show('No se pudo iniciar: ' + (err && err.message ? err.message : err));
+          btn.disabled = false;
+        }
+      });
+    })();
+  </script>
 </body>
 </html>
