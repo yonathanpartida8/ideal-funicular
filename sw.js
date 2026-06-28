@@ -3,11 +3,13 @@
  * Estrategia: cache-first para los recursos propios y vendor (modelos/libs),
  * con red como respaldo. Sube CACHE_VERSION al cambiar archivos.
  */
-const CACHE_VERSION = 'ai-hud-v2';
+const CACHE_VERSION = 'ai-hud-v3';
 const APP_SHELL = [
   './',
   './index.html',
   './css/hud.css',
+  './app.bundle.js',
+  './js/vision/detector.worker.js',
   './js/config.js',
   './js/main.js',
   './js/util/math.js',

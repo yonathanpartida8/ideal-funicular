@@ -27,9 +27,26 @@ const offscreen = (typeof OffscreenCanvas !== 'undefined')
 const offCtx = offscreen ? offscreen.getContext('2d', { willReadFrequently: true }) : null;
 
 /** Carga de scripts con fallback local -> CDN. */
-function tryImport(urls) {
+/**
+ * Carga un script probando varias URLs. Primero intenta importScripts directo;
+ * si el servidor entrega un MIME no-JS (Chrome lo rechaza), descarga el código
+ * con fetch() (que ignora el MIME) y hace importScripts de un Blob controlado.
+ */
+async function tryImport(urls) {
   for (const u of urls) {
-    try { importScripts(u); return u; } catch (_) { /* siguiente */ }
+    // fetch() ignora el MIME del servidor; el Blob lo fija a text/javascript,
+    // así importScripts no es rechazado aunque el .js venga como text/plain.
+    try {
+      const res = await fetch(u);
+      if (res.ok) {
+        const code = await res.text();
+        const blobUrl = URL.createObjectURL(new Blob([code], { type: 'text/javascript' }));
+        importScripts(blobUrl);
+        URL.revokeObjectURL(blobUrl);
+        return u;
+      }
+    } catch (_) { /* respaldo importScripts directo */ }
+    try { importScripts(u); return u; } catch (_) { /* siguiente URL */ }
   }
   return null;
 }
@@ -39,11 +56,13 @@ async function init(opts = {}) {
   scoreThreshold = opts.scoreThreshold ?? scoreThreshold;
   if (opts.vehicleLabels) vehicleLabels = opts.vehicleLabels;
 
-  // 1) Cargar TensorFlow.js (vendor local primero, luego CDN).
-  const tfUrl = tryImport([
+  // 1) Cargar TensorFlow.js. Las URLs llegan absolutas desde el hilo principal
+  //    (vendor local primero, luego CDN) para funcionar también como blob worker.
+  const tfUrls = (opts.tfUrls && opts.tfUrls.length) ? opts.tfUrls : [
     '../../vendor/tf.min.js',
     'https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.20.0/dist/tf.min.js',
-  ]);
+  ];
+  const tfUrl = await tryImport(tfUrls);
   if (!tfUrl || typeof self.tf === 'undefined') {
     throw new Error('No se pudo cargar TensorFlow.js (sin vendor local ni red).');
   }
@@ -59,10 +78,11 @@ async function init(opts = {}) {
   }
 
   // 3) Cargar COCO-SSD (vendor local primero, luego CDN).
-  tryImport([
+  const cocoUrls = (opts.cocoUrls && opts.cocoUrls.length) ? opts.cocoUrls : [
     '../../vendor/coco-ssd.min.js',
     'https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js',
-  ]);
+  ];
+  await tryImport(cocoUrls);
   if (typeof self.cocoSsd === 'undefined') {
     throw new Error('No se pudo cargar el modelo COCO-SSD.');
   }

@@ -98,8 +98,10 @@
         btn.disabled = true;
         show('Iniciando…');
         try {
-          var mod = await import('./js/main.js');
-          await mod.startApp({ onStatus: show });
+          if (typeof window.startApp !== 'function') {
+            throw new Error('El bundle no cargó (revisa app.bundle.js junto a index.html).');
+          }
+          await window.startApp({ onStatus: show });
           started = true;
         } catch (err) {
           console.error(err);
@@ -109,5 +111,12 @@
       });
     })();
   </script>
+
+  <!--
+    Bundle CLÁSICO (no módulo): se ejecuta aunque el servidor entregue los .js
+    con un MIME incorrecto. Generado con `node build.mjs` a partir de js/*.
+    Para desarrollo con módulos ES, ver README (sección "Desarrollo").
+  -->
+  <script defer src="./app.bundle.js"></script>
 </body>
 </html>

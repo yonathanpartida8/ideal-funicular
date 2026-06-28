@@ -59,6 +59,25 @@ Abre **http://localhost:8080** en Chrome (Android) y pulsa **INICIAR HUD**.
 `localhost` es contexto seguro, así que la cámara y los sensores funcionan sin
 HTTPS. Para abrir desde otro equipo necesitarás servir por HTTPS.
 
+> **Funciona en cualquier servidor estático.** La app se carga como un único
+> *bundle* clásico (`app.bundle.js`), no como módulos ES, así que se ejecuta
+> aunque el servidor entregue los `.js` con un MIME incorrecto (algo habitual en
+> servidores de archivos de Android). Hasta el Web Worker de IA y las librerías
+> se cargan vía `fetch()` + `Blob`, que ignoran el MIME del servidor.
+
+### Desarrollo (editar el código)
+
+El código fuente vive en `js/` como módulos ES. Tras editarlo, regenera el
+bundle que sirve la app:
+
+```bash
+node build.mjs      # reescribe app.bundle.js a partir de js/*
+```
+
+`build.mjs` no tiene dependencias: concatena los módulos, quita `import/export`
+y los envuelve en una IIFE. El worker (`js/vision/detector.worker.js`) se sirve
+tal cual y se carga de forma robusta frente al MIME.
+
 Para **offline desde el primer arranque**, vendoriza las librerías: ver
 [`vendor/README.md`](vendor/README.md). El Service Worker cachea el shell para
 arranques posteriores sin red.

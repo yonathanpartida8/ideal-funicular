@@ -20,9 +20,25 @@ export class VisionEngine {
   }
 
   async init() {
-    this.worker = new Worker(new URL('./detector.worker.js', import.meta.url), {
-      type: 'classic',
-    });
+    const base = document.baseURI;
+    const abs = (p) => new URL(p, base).href;
+    const workerAbs = abs('js/vision/detector.worker.js');
+
+    // El navegador rechaza scripts de Worker (y de importScripts) con MIME
+    // no-JS, incluso clásicos. Para funcionar en CUALQUIER servidor estático
+    // (p. ej. servidores de archivos de Android que entregan .js como
+    // text/plain), descargamos el código del worker con fetch() —que ignora el
+    // MIME— y creamos el Worker desde un Blob cuyo MIME sí controlamos.
+    try {
+      const res = await fetch(workerAbs);
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const code = await res.text();
+      const blobUrl = URL.createObjectURL(new Blob([code], { type: 'text/javascript' }));
+      this.worker = new Worker(blobUrl, { type: 'classic' });
+    } catch (e) {
+      // Respaldo: carga directa (servidores con MIME correcto).
+      this.worker = new Worker(workerAbs, { type: 'classic' });
+    }
     this.worker.onmessage = (ev) => this._onMessage(ev.data);
     this.worker.onerror = (e) => this.onError && this.onError(e.message || 'worker error');
 
@@ -36,6 +52,11 @@ export class VisionEngine {
           inputSize: CONFIG.inference.inputSizes[CONFIG.inference.defaultSizeIdx],
           scoreThreshold: CONFIG.inference.scoreThreshold,
           vehicleLabels: CONFIG.inference.vehicleLabels,
+          // URLs absolutas (vendor local primero, luego CDN) para el blob worker.
+          tfUrls: [abs('vendor/tf.min.js'),
+            'https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.20.0/dist/tf.min.js'],
+          cocoUrls: [abs('vendor/coco-ssd.min.js'),
+            'https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js'],
         },
       });
     });
