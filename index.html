@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta
+    name="viewport"
+    content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
+  />
+  <meta name="theme-color" content="#000000" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <title>AI Driving HUD · AR Road Assistant</title>
+  <link rel="stylesheet" href="./css/hud.css" />
+</head>
+<body>
+  <!-- ===== Pantalla de arranque ===== -->
+  <div id="startScreen" class="overlay-screen">
+    <div class="start-card">
+      <h1 class="brand">AI&nbsp;DRIVING&nbsp;HUD</h1>
+      <p class="subtitle">Copiloto digital · 100% local · sin nube</p>
+      <ul class="feature-list">
+        <li>Detección de vehículos en tiempo real (on-device)</li>
+        <li>Tracking multi-objeto + estimación de velocidad relativa</li>
+        <li>Fusión de sensores (GPS, acelerómetro, giroscopio, brújula)</li>
+        <li>Alertas de colisión por tiempo a colisión (TTC)</li>
+      </ul>
+      <button id="startBtn" class="primary-btn">INICIAR HUD</button>
+      <p class="legal">
+        Asistencia experimental. No sustituye la atención del conductor.
+        No realiza reconocimiento de personas, placas ni identidades.
+      </p>
+      <p id="startStatus" class="status-line"></p>
+    </div>
+  </div>
+
+  <!-- ===== Escenario principal ===== -->
+  <main id="stage" class="stage hidden">
+    <!-- Video oculto: fuente de la cámara, dibujado vía WebGL -->
+    <video id="camVideo" playsinline muted autoplay></video>
+
+    <!-- Capa 0: render WebGL2 (video + cajas + trayectorias con glow) -->
+    <canvas id="glCanvas" class="layer gl-layer"></canvas>
+
+    <!-- Capa 1: overlay Canvas2D (texto nítido, etiquetas, indicadores) -->
+    <canvas id="hudCanvas" class="layer hud-layer"></canvas>
+
+    <!-- Panel de telemetría / controles -->
+    <div id="telemetry" class="telemetry">
+      <div class="tele-row"><span id="fpsUI" class="tele-pill">UI -- fps</span>
+        <span id="fpsAI" class="tele-pill">AI -- fps</span>
+        <span id="modeTag" class="tele-pill">--</span></div>
+    </div>
+
+    <div class="controls">
+      <button id="muteBtn" class="ctrl-btn" title="Audio">🔊</button>
+      <button id="hudBtn" class="ctrl-btn" title="Detalle HUD">◎</button>
+      <button id="stopBtn" class="ctrl-btn" title="Detener">⏻</button>
+    </div>
+  </main>
+
+  <!-- App como módulo ES6 -->
+  <script type="module" src="./js/main.js"></script>
+</body>
+</html>
